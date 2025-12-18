@@ -1,428 +1,418 @@
 import sys
 import struct
-import re
+import csv
 from enum import Enum
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any
 
 
 class Opcode(Enum):
-    """Коды операций УВМ согласно спецификации"""
-    LOAD_CONST = 1
-    ADD = 3 
-    STORE = 4
-    LOAD_MEM = 7
+    """Коды операций УВМ"""
+    LOAD_CONST = 1      # Загрузка константы (A=1)
+    ADD = 3             # Сложение (A=3)
+    STORE = 4           # Запись в память (A=4)
+    LOAD_MEM = 7        # Чтение из памяти (A=7)
 
 
-class Instruction:
-    """Представление инструкции в промежуточном формате"""
-    
-    def __init__(self, opcode: Opcode, operand: Optional[int] = None, 
-                 label: Optional[str] = None, address: int = 0):
-        self.opcode = opcode
-        self.operand = operand  # Для LOAD_CONST и STORE
-        self.label = label      # Для ссылок на метки
-        self.address = address  # Адрес в памяти команд
-        self.size = 3           # Все команды 3 байта
+class UVMInterpreter:
+    def __init__(self, memory_size=65536):
+        self.memory = [0] * memory_size  # Память данных
+        self.code_memory = []           # Память команд
+        self.stack = []                 # Стек УВМ
+        self.pc = 0                     # Счетчик команд
+        self.running = False
+        self.memory_size = memory_size
         
-    def __repr__(self):
-        result = f"{self.address:04d}: {self.opcode.name}"
-        if self.operand is not None:
-            result += f" {self.operand}"
-        if self.label:
-            result += f" [{self.label}]"
-        return result
-
-
-class BinaryEncoder:
-    """Кодирование команд в бинарный формат"""
-    
-    @staticmethod
-    def encode_instruction(instr: Instruction) -> bytes:
-        """Кодирование одной инструкции в бинарный формат"""
-        opcode = instr.opcode
+    def load_binary(self, binary_path: str):
+        """Загрузка бинарной программы"""
+        with open(binary_path, 'rb') as f:
+            data = f.read()
         
-        if opcode == Opcode.LOAD_CONST:
-            # Формат: A=1, B=константа (биты 3-11)
-            if instr.operand is None:
-                raise ValueError("LOAD_CONST требует константу")
-            
-            value = instr.operand
-            # Проверяем диапазон (0-511 для 9 бит)
-            if value < 0 or value > 511:
-                raise ValueError(f"Константа {value} вне диапазона 0-511")
-            
-            # Упаковка: биты 0-2: A=1, биты 3-11: константа
-            word = (1 << 12) | (value << 3)
-            return struct.pack('<I', word)[:3]  # 3 байта
-            
-        elif opcode == Opcode.STORE:
-            # Формат: A=4, B=адрес (биты 3-19)
-            if instr.operand is None:
-                raise ValueError("STORE требует адрес")
-            
-            address = instr.operand
-            if address < 0 or address > 0xFFFF:
-                raise ValueError(f"Адрес {address} вне диапазона 0-65535")
-            
-            # Упаковка: биты 0-2: A=4, биты 3-19: адрес
-            word = (4 << 16) | (address << 3)
-            return struct.pack('<I', word)[:3]
-            
-        elif opcode == Opcode.LOAD_MEM:
-            # Формат: A=7, B=0
-            return bytes([0x07, 0x00, 0x00])
-            
-        elif opcode == Opcode.ADD:
-            # Формат: A=3, B=0
-            return bytes([0x03, 0x00, 0x00])
-            
+        # Загружаем команды по 3 байта
+        self.code_memory.clear()
+        for i in range(0, len(data), 3):
+            chunk = data[i:i+3]
+            if len(chunk) == 3:
+                self.code_memory.append(chunk)
+            elif len(chunk) > 0:
+                # Дополняем нулями если нужно
+                chunk = chunk + bytes([0] * (3 - len(chunk)))
+                self.code_memory.append(chunk)
+        
+        print(f"Загружено {len(self.code_memory)} команд")
+    
+    def decode_instruction(self, instr_bytes: bytes) -> Dict[str, Any]:
+        """Декодирование бинарной команды"""
+        if len(instr_bytes) != 3:
+            raise ValueError(f"Неверная длина команды: {len(instr_bytes)} байт")
+        
+        # Объединяем 3 байта в 24-битное слово (little-endian)
+        word = (instr_bytes[2] << 16) | (instr_bytes[1] << 8) | instr_bytes[0]
+        
+        # Извлекаем поле A (биты 0-2)
+        a_field = word & 0x07
+        
+        # Извлекаем поле B (биты 3-19)
+        b_field = (word >> 3) & 0xFFFF
+        
+        try:
+            opcode = Opcode(a_field)
+        except ValueError:
+            raise ValueError(f"Неизвестный код операции: {a_field}")
+        
+        return {
+            'opcode': opcode,
+            'b_field': b_field,
+            'raw': instr_bytes
+        }
+    
+    def execute_load_const(self, b_field: int):
+        """Выполнение загрузки константы"""
+        self.stack.append(b_field)
+        print(f"LOAD_CONST: загружена константа {b_field}, стек: {self.stack}")
+    
+    def execute_store(self, b_field: int):
+        """Выполнение записи в память"""
+        if not self.stack:
+            raise RuntimeError("Стек пуст при выполнении STORE")
+        
+        value = self.stack.pop()
+        if 0 <= b_field < self.memory_size:
+            self.memory[b_field] = value
+            print(f"STORE: записано значение {value} по адресу {b_field}")
         else:
-            raise ValueError(f"Неизвестный opcode: {opcode}")
-
-
-class Assembler:
-    """Основной класс ассемблера"""
+            raise RuntimeError(f"Недопустимый адрес памяти: {b_field}")
     
-    def __init__(self):
-        self.symbol_table: Dict[str, int] = {}  # Таблица меток
-        self.instructions: List[Instruction] = []  # Промежуточное представление
-        self.current_address = 0  # Текущий адрес в памяти команд
-        self.encoder = BinaryEncoder()
+    def execute_load_mem(self):
+        """Выполнение чтения из памяти"""
+        if not self.stack:
+            raise RuntimeError("Стек пуст при выполнении LOAD_MEM")
         
-    def preprocess_source(self, source: str) -> List[str]:
-        """Предварительная обработка исходного кода"""
-        lines = []
-        for line in source.split('\n'):
-            # Удаляем лишние пробелы и комментарии
-            line = line.strip()
-            if not line:
-                continue
-                
-            # Удаляем комментарии (всё после ;)
-            if ';' in line:
-                line = line.split(';')[0].strip()
-                
-            if line:
-                lines.append(line)
-                
-        return lines
-    
-    def parse_operand(self, operand_str: str) -> Tuple[Optional[int], Optional[str]]:
-        """Парсинг операнда, возвращает (число, метка)"""
-        operand_str = operand_str.strip()
-        
-        # Шестнадцатеричное число (0x...)
-        if operand_str.startswith('0x'):
-            try:
-                return int(operand_str, 16), None
-            except ValueError:
-                raise ValueError(f"Неверный шестнадцатеричный формат: {operand_str}")
-        
-        # Десятичное число
-        if operand_str.isdigit() or (operand_str[0] == '-' and operand_str[1:].isdigit()):
-            return int(operand_str), None
-        
-        # Константа с решёткой (#...)
-        if operand_str.startswith('#'):
-            num_str = operand_str[1:]
-            if num_str.isdigit() or (num_str[0] == '-' and num_str[1:].isdigit()):
-                return int(num_str), None
-            elif num_str.startswith('0x'):
-                try:
-                    return int(num_str[2:], 16), None
-                except ValueError:
-                    # Это может быть метка после решётки
-                    return None, num_str
-            else:
-                # Это может быть метка после решётки
-                return None, num_str
-        
-        # Просто метка
-        return None, operand_str
-    
-    def parse_instruction(self, line: str) -> Optional[Instruction]:
-        """Разбор строки ассемблера в промежуточное представление"""
-        
-        # Проверка на метку
-        if line.endswith(':'):
-            label = line[:-1].strip()
-            if label in self.symbol_table:
-                raise ValueError(f"Повторное определение метки: {label}")
-            self.symbol_table[label] = self.current_address
-            return None
-        
-        # Разделяем на мнемонику и операнды
-        parts = re.split(r'\s+', line, maxsplit=1)
-        mnemonic = parts[0].upper()
-        
-        # Определяем операнд, если есть
-        operand = None
-        label_ref = None
-        
-        if len(parts) > 1:
-            operand_str = parts[1].strip()
-            num_val, label_val = self.parse_operand(operand_str)
-            
-            if num_val is not None:
-                operand = num_val
-            elif label_val is not None:
-                label_ref = label_val
-            else:
-                raise ValueError(f"Неверный операнд: {operand_str}")
-        
-        # Создаем инструкцию
-        if mnemonic == "LOAD":
-            if operand is not None or label_ref is not None:
-                # Загрузка константы
-                return Instruction(Opcode.LOAD_CONST, operand, label_ref, self.current_address)
-            else:
-                # Чтение из памяти (без операнда)
-                return Instruction(Opcode.LOAD_MEM, None, None, self.current_address)
-        
-        elif mnemonic == "STORE":
-            if operand is None and label_ref is None:
-                raise ValueError("STORE требует операнд")
-            return Instruction(Opcode.STORE, operand, label_ref, self.current_address)
-        
-        elif mnemonic == "ADD":
-            return Instruction(Opcode.ADD, None, None, self.current_address)
-        
+        address = self.stack.pop()
+        if 0 <= address < self.memory_size:
+            value = self.memory[address]
+            self.stack.append(value)
+            print(f"LOAD_MEM: прочитано значение {value} из адреса {address}, стек: {self.stack}")
         else:
-            raise ValueError(f"Неизвестная мнемоника: {mnemonic}")
+            raise RuntimeError(f"Недопустимый адрес памяти: {address}")
     
-    def resolve_labels(self):
-        """Разрешение ссылок на метки"""
-        for instr in self.instructions:
-            if instr.label:
-                if instr.label not in self.symbol_table:
-                    raise ValueError(f"Неопределенная метка: {instr.label}")
-                
-                # Заменяем ссылку на метку фактическим значением
-                instr.operand = self.symbol_table[instr.label]
-                instr.label = None
+    def execute_add(self):
+        """Выполнение сложения"""
+        if len(self.stack) < 2:
+            raise RuntimeError("Недостаточно операндов в стеке для ADD")
+        
+        # Второй операнд снимается первым
+        op2 = self.stack.pop()
+        # Первый операнд - из памяти по адресу из стека
+        address = self.stack.pop()
+        
+        if 0 <= address < self.memory_size:
+            op1 = self.memory[address]
+            result = op1 + op2
+            self.stack.append(result)
+            print(f"ADD: {op1} + {op2} = {result} (адрес: {address}), стек: {self.stack}")
+        else:
+            raise RuntimeError(f"Недопустимый адрес памяти: {address}")
     
-    def assemble(self, source: str, test_mode: bool = False) -> List[Instruction]:
-        """Основной метод ассемблирования - возвращает промежуточное представление"""
+    def run(self):
+        """Основной цикл выполнения"""
+        self.running = True
+        self.pc = 0
         
-        # Сброс состояния
-        self.symbol_table.clear()
-        self.instructions.clear()
-        self.current_address = 0
+        print("=== Начало выполнения программы ===")
         
-        # Предварительная обработка
-        lines = self.preprocess_source(source)
-        
-        # Первый проход: сбор меток
-        for line in lines:
-            if line.endswith(':'):
-                label = line[:-1].strip()
-                if label in self.symbol_table:
-                    raise ValueError(f"Повторное определение метки: {label}")
-                self.symbol_table[label] = self.current_address
-            elif line.strip():
-                # Только считаем адреса для не-меток
-                self.current_address += 3
-        
-        # Сброс адреса для второго прохода
-        self.current_address = 0
-        
-        # Второй проход: разбор инструкций
-        for line in lines:
-            if not line.endswith(':'):  # Пропускаем строки с метками
-                instr = self.parse_instruction(line)
-                if instr:
-                    instr.address = self.current_address
-                    self.instructions.append(instr)
-                    self.current_address += 3
-        
-        # Разрешение меток
-        self.resolve_labels()
-        
-        # Проверка диапазонов
-        for instr in self.instructions:
-            if instr.opcode == Opcode.LOAD_CONST and instr.operand is not None:
-                if instr.operand < 0 or instr.operand > 511:
-                    raise ValueError(f"Константа {instr.operand} вне диапазона 0-511")
-            elif instr.opcode == Opcode.STORE and instr.operand is not None:
-                if instr.operand < 0 or instr.operand > 0xFFFF:
-                    raise ValueError(f"Адрес {instr.operand} вне диапазона 0-65535")
-        
-        # Вывод в тестовом режиме
-        if test_mode:
-            self.print_intermediate_representation()
-        
-        return self.instructions
-    
-    def assemble_to_binary(self, source: str, test_mode: bool = False) -> bytes:
-        """Ассемблирование с генерацией бинарного кода"""
-        intermediate = self.assemble(source, test_mode)
-        
-        binary_code = bytearray()
-        
-        for instr in intermediate:
+        while self.running and self.pc < len(self.code_memory):
+            instr_bytes = self.code_memory[self.pc]
+            
             try:
-                binary_instr = self.encoder.encode_instruction(instr)
-                binary_code.extend(binary_instr)
-                
-                if test_mode:
-                    hex_bytes = ', '.join(f'0x{b:02X}' for b in binary_instr)
-                    print(f"{instr.address:04X}: {hex_bytes}")
-                    
+                instr = self.decode_instruction(instr_bytes)
             except ValueError as e:
-                print(f"Ошибка кодирования: {e}")
-                return b''
-        
-        return bytes(binary_code)
-    
-    def print_intermediate_representation(self):
-        """Вывод промежуточного представления"""
-        print("\n=== Промежуточное представление ===")
-        print("Адрес | Опкод       | Операнд")
-        print("-" * 40)
-        
-        for instr in self.instructions:
-            operand_str = ""
-            if instr.operand is not None:
-                if instr.opcode == Opcode.LOAD_CONST:
-                    operand_str = f"#{instr.operand}"
-                else:
-                    operand_str = f"0x{instr.operand:04X}"
+                print(f"Ошибка декодирования команды: {e}")
+                break
             
-            print(f"{instr.address:04X}  | {instr.opcode.name:<11} | {operand_str}")
+            print(f"[PC={self.pc:04d}] {instr['opcode'].name} B={instr['b_field']}")
+            
+            try:
+                if instr['opcode'] == Opcode.LOAD_CONST:
+                    self.execute_load_const(instr['b_field'])
+                elif instr['opcode'] == Opcode.STORE:
+                    self.execute_store(instr['b_field'])
+                elif instr['opcode'] == Opcode.LOAD_MEM:
+                    self.execute_load_mem()
+                elif instr['opcode'] == Opcode.ADD:
+                    self.execute_add()
+                else:
+                    print(f"Неизвестная команда: {instr['opcode']}")
+                    break
+                    
+            except RuntimeError as e:
+                print(f"Ошибка выполнения: {e}")
+                break
+            
+            self.pc += 1
         
-        if self.symbol_table:
-            print("\n=== Таблица меток ===")
-            for label, addr in self.symbol_table.items():
-                print(f"{label}: 0x{addr:04X}")
+        self.running = False
+        print(f"\nВыполнение завершено. PC={self.pc}")
+        print(f"Состояние стека: {self.stack}")
     
-    def save_to_file(self, binary_data: bytes, filename: str):
-        """Сохранение бинарного кода в файл"""
-        with open(filename, 'wb') as f:
-            f.write(binary_data)
+    def save_memory_dump(self, output_path: str, start_addr: int, end_addr: int):
+        """Сохранение дампа памяти в CSV"""
+        if start_addr < 0 or end_addr > self.memory_size or start_addr >= end_addr:
+            raise ValueError(f"Некорректный диапазон адресов: {start_addr}-{end_addr}")
         
-        print(f"Бинарный файл сохранён: {filename}")
-        print(f"Размер: {len(binary_data)} байт")
+        with open(output_path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(['Адрес', 'Значение', 'Шестнадцатеричное'])
+            
+            for addr in range(start_addr, end_addr):
+                value = self.memory[addr]
+                writer.writerow([addr, value, f"0x{value:04X}"])
+        
+        print(f"Дамп памяти сохранен в {output_path} ({end_addr-start_addr} записей)")
 
 
-def test_specific_sequences():
-    """Тестирование конкретных последовательностей из спецификации"""
+def test_array_copy():
+    """Тестовая программа: копирование массива"""
+    print("\n=== Тест: Копирование массива ===")
     
-    assembler = Assembler()
+    # Создаем простую программу для копирования массива
+    program = """
+        ; Копирование 5 элементов из адресов 100-104 в 200-204
+        
+        ; Загружаем счетчик
+        LOAD #5
+        STORE 99    ; Сохраняем счетчик в памяти
+        
+    loop:
+        ; Проверяем счетчик
+        LOAD 99
+        LOAD #0
+        ; Здесь должна быть команда сравнения, но её нет
+        ; Упростим: будем выполнять фиксированное число итераций
+        
+        ; Вычисляем исходный адрес
+        LOAD #100
+        LOAD 99
+        ; Не хватает вычитания, упрощаем
+        
+        ; Просто копируем каждый элемент отдельно
+    """
     
-    print("=== Тестирование последовательностей из спецификации ===")
+    # Вместо этого создадим прямую программу
+    direct_program = """
+        ; Копируем элемент 0
+        LOAD 100
+        STORE 200
+        
+        ; Копируем элемент 1
+        LOAD 101
+        STORE 201
+        
+        ; Копируем элемент 2
+        LOAD 102
+        STORE 202
+        
+        ; Копируем элемент 3
+        LOAD 103
+        STORE 203
+        
+        ; Копируем элемент 4
+        LOAD 104
+        STORE 204
+    """
     
-    # Тест 1: LOAD #155 (A=1, B=155)
-    print("\n1. Тест загрузки константы #155:")
-    test1 = "LOAD #155"
-    binary1 = assembler.assemble_to_binary(test1, test_mode=False)
-    expected1 = bytes([0x09, 0x04, 0x00])
-    print(f"   Получено: {binary1.hex(' ')}")
-    print(f"   Ожидается: {expected1.hex(' ')}")
-    if binary1 == expected1:
-        print("   ✓ СОВПАДАЕТ")
-    else:
-        print("   ✗ НЕ СОВПАДАЕТ")
+    return direct_program
+
+
+def test_addition():
+    """Тестовая программа: сложение"""
+    print("\n=== Тест: Сложение чисел ===")
     
-    # Тест 2: LOAD (чтение из памяти, A=7)
-    print("\n2. Тест чтения из памяти (A=7):")
-    test2 = "LOAD"
-    binary2 = assembler.assemble_to_binary(test2, test_mode=False)
-    expected2 = bytes([0x07, 0x00, 0x00])
-    print(f"   Получено: {binary2.hex(' ')}")
-    print(f"   Ожидается: {expected2.hex(' ')}")
-    if binary2 == expected2:
-        print("   ✓ СОВПАДАЕТ")
-    else:
-        print("   ✗ НЕ СОВПАДАЕТ")
+    program = """
+        ; Сложение двух чисел: memory[300] + memory[301] = memory[302]
+        
+        ; Загружаем первое число
+        LOAD #300
+        LOAD
+        
+        ; Загружаем второе число
+        LOAD #301
+        LOAD
+        
+        ; Складываем
+        ADD
+        
+        ; Сохраняем результат
+        STORE 302
+    """
     
-    # Тест 3: STORE 463 (A=4, B=463)
-    print("\n3. Тест записи в память по адресу 463:")
-    # Сначала нужно положить значение в стек
-    test3 = "LOAD #0\nSTORE 463"
-    binary3 = assembler.assemble_to_binary(test3, test_mode=False)
-    # Берем только байты команды STORE (последние 3 байта)
-    store_bytes = binary3[-3:]
-    expected3 = bytes([0x7C, 0x0E, 0x00])
-    print(f"   Получено: {store_bytes.hex(' ')}")
-    print(f"   Ожидается: {expected3.hex(' ')}")
-    if store_bytes == expected3:
-        print("   ✓ СОВПАДАЕТ")
-    else:
-        print("   ✗ НЕ СОВПАДАЕТ")
-        # Отладочная информация
-        print(f"   Полная последовательность: {binary3.hex(' ')}")
+    return program
+
+
+def test_vector_addition():
+    """Тестовая программа: сложение вектора с константой"""
+    print("\n=== Тест: Сложение вектора с константой ===")
     
-    # Тест 4: ADD (A=3)
-    print("\n4. Тест сложения (A=3):")
-    test4 = "ADD"
-    binary4 = assembler.assemble_to_binary(test4, test_mode=False)
-    expected4 = bytes([0x03, 0x00, 0x00])
-    print(f"   Получено: {binary4.hex(' ')}")
-    print(f"   Ожидается: {expected4.hex(' ')}")
-    if binary4 == expected4:
-        print("   ✓ СОВПАДАЕТ")
-    else:
-        print("   ✗ НЕ СОВПАДАЕТ")
+    program = """
+        ; Вектор из 7 элементов (100-106) складываем с 157
+        ; Результат записываем в 200-206
+        
+        ; Элемент 0
+        LOAD 100
+        LOAD #157
+        ADD
+        STORE 200
+        
+        ; Элемент 1
+        LOAD 101
+        LOAD #157
+        ADD
+        STORE 201
+        
+        ; Элемент 2
+        LOAD 102
+        LOAD #157
+        ADD
+        STORE 202
+        
+        ; Элемент 3
+        LOAD 103
+        LOAD #157
+        ADD
+        STORE 203
+        
+        ; Элемент 4
+        LOAD 104
+        LOAD #157
+        ADD
+        STORE 204
+        
+        ; Элемент 5
+        LOAD 105
+        LOAD #157
+        ADD
+        STORE 205
+        
+        ; Элемент 6
+        LOAD 106
+        LOAD #157
+        ADD
+        STORE 206
+    """
+    
+    return program
 
 
 def main():
     """Основная функция CLI"""
     
-    if len(sys.argv) < 3:
+    if len(sys.argv) < 5:
         print("Использование:")
-        print("  python assembler.py <входной_файл.asm> <выходной_файл.bin> [--test]")
-        print("  python assembler.py --test-spec")
+        print("  python interpreter.py <бинарный_файл> <выходной_csv> <начальный_адрес> <конечный_адрес>")
         print()
-        print("Аргументы:")
-        print("  --test      Режим тестирования с выводом промежуточного представления")
-        print("  --test-spec Проверка тестовых последовательностей из спецификации")
+        print("Примеры тестов:")
+        print("  python interpreter.py --test-copy")
+        print("  python interpreter.py --test-add")
+        print("  python interpreter.py --test-vector")
         return
     
-    if sys.argv[1] == "--test-spec":
-        test_specific_sequences()
+    if sys.argv[1] == "--test-copy":
+        # Тест копирования массива
+        from assembler import Assembler
+        
+        # Создаем тестовые данные
+        interpreter = UVMInterpreter()
+        for i in range(5):
+            interpreter.memory[100 + i] = i * 10  # 0, 10, 20, 30, 40
+        
+        # Создаем и компилируем программу
+        program = test_array_copy()
+        assembler = Assembler()
+        binary = assembler.assemble_to_binary(program, test_mode=False)
+        
+        # Сохраняем во временный файл
+        with open("temp_copy.bin", "wb") as f:
+            f.write(binary)
+        
+        # Загружаем и выполняем
+        interpreter.load_binary("temp_copy.bin")
+        interpreter.run()
+        
+        # Выводим результаты
+        print("\nРезультаты копирования:")
+        for i in range(5):
+            src = interpreter.memory[100 + i]
+            dst = interpreter.memory[200 + i]
+            print(f"  memory[{100+i}] = {src} -> memory[{200+i}] = {dst}")
+        
+        interpreter.save_memory_dump("copy_dump.csv", 95, 210)
+        return
+    
+    elif sys.argv[1] == "--test-add":
+        # Тест сложения
+        from assembler import Assembler
+        
+        interpreter = UVMInterpreter()
+        interpreter.memory[300] = 42
+        interpreter.memory[301] = 58
+        
+        program = test_addition()
+        assembler = Assembler()
+        binary = assembler.assemble_to_binary(program, test_mode=False)
+        
+        with open("temp_add.bin", "wb") as f:
+            f.write(binary)
+        
+        interpreter.load_binary("temp_add.bin")
+        interpreter.run()
+        
+        print(f"\nРезультат сложения: {interpreter.memory[300]} + {interpreter.memory[301]} = {interpreter.memory[302]}")
+        interpreter.save_memory_dump("add_dump.csv", 295, 310)
+        return
+    
+    elif sys.argv[1] == "--test-vector":
+        # Тест сложения вектора
+        from assembler import Assembler
+        
+        interpreter = UVMInterpreter()
+        # Заполняем исходный вектор
+        for i in range(7):
+            interpreter.memory[100 + i] = i * 20
+        
+        program = test_vector_addition()
+        assembler = Assembler()
+        binary = assembler.assemble_to_binary(program, test_mode=False)
+        
+        with open("temp_vector.bin", "wb") as f:
+            f.write(binary)
+        
+        interpreter.load_binary("temp_vector.bin")
+        interpreter.run()
+        
+        print("\nРезультаты сложения вектора:")
+        for i in range(7):
+            src = interpreter.memory[100 + i]
+            res = interpreter.memory[200 + i]
+            print(f"  {src} + 157 = {res}")
+        
+        interpreter.save_memory_dump("vector_dump.csv", 95, 210)
         return
     
     # Обычный режим работы
-    input_file = sys.argv[1]
-    output_file = sys.argv[2]
-    test_mode = "--test" in sys.argv
+    binary_file = sys.argv[1]
+    output_csv = sys.argv[2]
+    start_addr = int(sys.argv[3])
+    end_addr = int(sys.argv[4])
+    
+    interpreter = UVMInterpreter()
     
     try:
-        # Чтение исходного файла
-        with open(input_file, 'r', encoding='utf-8') as f:
-            source_code = f.read()
-        
-        # Ассемблирование
-        assembler = Assembler()
-        
-        if test_mode:
-            # Получаем промежуточное представление
-            print("=== Режим тестирования ===")
-            print(f"Исходный файл: {input_file}")
-            print("\nИсходный код:")
-            print(source_code)
-            print("\n" + "="*50)
-            
-            intermediate = assembler.assemble(source_code, test_mode=True)
-            
-            # Генерируем бинарный код
-            print("\n" + "="*50)
-            print("Бинарное представление:")
-            binary_data = assembler.assemble_to_binary(source_code, test_mode=True)
-            
-        else:
-            # Просто генерируем бинарный код
-            binary_data = assembler.assemble_to_binary(source_code, test_mode=False)
-        
-        # Сохранение результата
-        assembler.save_to_file(binary_data, output_file)
-        
+        interpreter.load_binary(binary_file)
+        interpreter.run()
+        interpreter.save_memory_dump(output_csv, start_addr, end_addr)
     except FileNotFoundError:
-        print(f"Ошибка: файл '{input_file}' не найден")
-    except ValueError as e:
-        print(f"Ошибка ассемблирования: {e}")
+        print(f"Ошибка: файл '{binary_file}' не найден")
     except Exception as e:
-        print(f"Неожиданная ошибка: {e}")
+        print(f"Ошибка выполнения: {e}")
 
 
 if __name__ == "__main__":
