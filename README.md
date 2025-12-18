@@ -35,47 +35,77 @@ STORE <адрес>
 
 ## Пример программы
 ```asm
-; Загрузка константы 42
-LOAD #42
-
-; Запись значения в память по адресу 100
-STORE 100
-
-; Чтение значения из памяти по адресу 100
-LOAD #100
-LOAD
-
-; Сложение: memory[100] + 10
-LOAD #100
-LOAD #10
-ADD
+START:
+    LOAD #155      ; Загрузка константы
+    STORE 1000     ; Запись в память
+    
+    LOAD #1000     ; Загрузка адреса
+    LOAD           ; Чтение из памяти
+    
+    LOAD #200      ; Подготовка к сложению
+    LOAD #50
+    ADD            ; Сложение
+    
+END:
 ```
+Формат команд в памяти
+Все команды занимают 3 байта:
+
+Биты 0-2: поле A (код операции)
+
+Биты 3-19: поле B (операнд)
+
+Коды операций:
+
+A=1: LOAD_CONST
+
+A=3: ADD
+
+A=4: STORE
+
+A=7: LOAD_MEM
+
+Работа со стеком
+УВМ использует стековую архитектуру:
+
+LOAD #const и LOAD (чтение) кладут значения на стек
+
+STORE и ADD снимают значения со стека
+
+Стек растет вверх (новые элементы добавляются в конец)
+
 Ограничения
-Константы: 0-511 (9 бит)
+Объем памяти данных: 65536 ячеек
 
-Адреса памяти: 0-65535 (16 бит)
+Размер стека: ограничен только объемом памяти
 
-Все команды занимают 3 байта
+Все значения целочисленные
 
-## Запуск и тестирование
+Нет операций вычитания, умножения, деления
 
-**requirements.txt:**
-Требуемые зависимости
-(для этого проекта зависимости минимальны)
-text
+Нет условных переходов и циклов в базовой спецификации
 
 **Примеры команд для запуска:**
 
 ```bash
-# Этап 1: Ассемблирование с выводом промежуточного представления
-python assembler.py test_programs/test1.asm output.bin --test
+# Проверить тесты из спецификации
+python assembler.py --test-spec
 
-# Этап 2: Генерация бинарного файла
-python assembler.py test_programs/test1.asm output.bin
+# Скомпилировать тестовую программу с выводом промежуточного представления
+python assembler.py test.asm output.bin --test
 
-# Этап 3: Интерпретация
-python interpreter.py output.bin memory_dump.csv 0 1000
+# Просто скомпилировать
+python assembler.py test.asm output.bin
 
-# Тестирование векторного сложения
-python assembler.py test_programs/vector_sum.asm vector.bin
-python interpreter.py vector.bin vector_dump.csv 1000 2010
+# Тест копирования массива
+python interpreter.py --test-copy
+
+# Тест сложения
+python interpreter.py --test-add
+
+# Тест сложения вектора
+python interpreter.py --test-vector
+
+# Запуск произвольной программы
+python assembler.py vector_sum.asm vector.bin
+python interpreter.py vector.bin result.csv 95 210
