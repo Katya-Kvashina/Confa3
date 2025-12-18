@@ -304,57 +304,6 @@ class Assembler:
         print(f"Размер: {len(binary_data)} байт")
 
 
-def create_test_programs():
-    """Создание тестовых программ из спецификации"""
-    
-    # Тест 1: Загрузка константы (A=1, B=155)
-    test1 = """LOAD #155"""
-    
-    # Тест 2: Чтение из памяти (A=7)
-    test2 = """LOAD #0
-LOAD"""
-    
-    # Тест 3: Запись в память (A=4, B=463)
-    test3 = """LOAD #0
-STORE 463"""
-    
-    # Тест 4: Сложение (A=3)
-    test4 = """LOAD #0
-LOAD #0
-ADD"""
-    
-    # Полный тест всех команд
-    full_test = """
-        ; Тест загрузки константы 155
-        ; Ожидается: 0x09 0x04 0x00
-        LOAD #155
-        
-        ; Тест чтения из памяти
-        ; Ожидается: 0x07 0x00 0x00
-        LOAD #0x100
-        LOAD
-        
-        ; Тест записи в память по адресу 463
-        ; Ожидается: 0x7C 0x0E 0x00
-        LOAD #0xFF
-        STORE 463
-        
-        ; Тест сложения
-        ; Ожидается: 0x03 0x00 0x00
-        LOAD #0x200
-        LOAD #10
-        ADD
-    """
-    
-    return {
-        "test1": test1,
-        "test2": test2,
-        "test3": test3,
-        "test4": test4,
-        "full": full_test
-    }
-
-
 def test_specific_sequences():
     """Тестирование конкретных последовательностей из спецификации"""
     
@@ -423,37 +372,14 @@ def main():
         print("Использование:")
         print("  python assembler.py <входной_файл.asm> <выходной_файл.bin> [--test]")
         print("  python assembler.py --test-spec")
-        print("  python assembler.py --test-all")
         print()
         print("Аргументы:")
         print("  --test      Режим тестирования с выводом промежуточного представления")
         print("  --test-spec Проверка тестовых последовательностей из спецификации")
-        print("  --test-all  Запуск всех встроенных тестов")
         return
     
     if sys.argv[1] == "--test-spec":
         test_specific_sequences()
-        return
-    
-    if sys.argv[1] == "--test-all":
-        # Запуск всех тестов
-        print("=== Запуск всех встроенных тестов ===\n")
-        
-        assembler = Assembler()
-        tests = create_test_programs()
-        
-        for test_name, test_source in tests.items():
-            print(f"\n--- Тест: {test_name} ---")
-            print(f"Исходный код:\n{test_source}")
-            print("\nРезультат:")
-            try:
-                binary = assembler.assemble_to_binary(test_source, test_mode=True)
-                print(f"\nСгенерировано {len(binary)} байт")
-                print(f"Байты: {binary.hex(' ')}")
-            except Exception as e:
-                print(f"Ошибка: {e}")
-        
-        print("\n=== Все тесты завершены ===")
         return
     
     # Обычный режим работы
